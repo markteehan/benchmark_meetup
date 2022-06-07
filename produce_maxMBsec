@@ -1,0 +1,103 @@
+#!/bin/sh
+
+export DT2=`date "+%Y%m%d-%H%M%S"`
+export LOG=/tmp
+export TZ="Asia/Singapore"
+export MS_ONEHOUR=3600000
+export REP_FACTOR=3
+export KAFKA_LOG4J_OPTS="-Dlog4j.configuration=file:/Users/teehan/Dropbox/sync/Scripts/45_Benchmark/localhost/tools-log4j.properties"
+
+Pause()
+{
+ #read hello
+ echo Paused
+ sleep 2
+}
+
+recreateTopic()
+{
+P_TOPIC=$1
+P_PARTITIONS=$2
+P_RETENTION_MS=$3
+#echo kafka-topics --bootstrap-server ${KAFKA} --delete --topic ${P_TOPIC}
+#     kafka-topics --bootstrap-server ${KAFKA} --delete --topic ${P_TOPIC} 2>/dev/null
+
+echo "(I) create topic ${P_TOPIC} with partitions=${P_PARTITIONS}"
+echo kafka-topics --bootstrap-server ${KAFKA} --create --topic ${P_TOPIC} --partitions ${P_PARTITIONS} --config retention.ms=$P_RETENTION_MS --replication-factor=${REP_FACTOR} --config max.message.bytes=8388608
+     kafka-topics --bootstrap-server ${KAFKA} --create --topic ${P_TOPIC} --partitions ${P_PARTITIONS} --config retention.ms=$P_RETENTION_MS --replication-factor=${REP_FACTOR} --config max.message.bytes=8388608
+}
+
+#overrides
+KAFKA_HOSTNAME=kafka1
+export KAFKA=${KAFKA_HOSTNAME}:9091
+
+RETAIN_ONEHOUR=3600000
+RETAIN_FIFTEENMINS=900000
+
+METRICS=
+METRICS=--print-metrics
+
+RECORD_SIZES="100 300 500 1000"
+MSGS=4000000
+
+CONSUME_TIMEOUT=120000   #default is 10000
+DONE=no
+
+ACKS="all 1 0"
+ACKS="all 1"
+
+PARTITIONS="3"
+partitions_print=`printf "%2s\n" "$PARTITIONS";`
+
+echo;echo;echo;echo;echo
+echo "(I) Running a benchmark to determine max Produce MB/sec for this cluster"
+echo "(I) The Benchmark topics will retain data for fifteen minutes"
+Pause
+for i in `echo $RECORD_SIZES`
+do
+  for j in `echo $ACKS`
+  do
+  msgsize_print=`printf "%5s\n" "$i";`
+  recreateTopic benchmark-${i}-BYTES $PARTITIONS $RETAIN_FIFTEENMINS
+  Pause
+  echo;echo "(I) Running a producer for ${MSGS} nessages and acks=${j}"
+  Pause
+  kafka-producer-perf-test --topic benchmark-${i}-BYTES --num-records ${MSGS} ${METRICS} --record-size $i --throughput -1 --producer-props bootstrap.servers=${KAFKA} acks=${j}>  /tmp/produce.txt
+
+  PRODUCE=`cat /tmp/produce.txt| grep " records sent,"`
+  echo;echo "(I) Running 1 Consumer..."
+  echo "kafka-consumer-perf-test --broker-list $KAFKA --timeout $CONSUME_TIMEOUT --topic benchmark-${i}-BYTES      --messages $MSGS"
+  Pause
+  kafka-consumer-perf-test --broker-list $KAFKA --timeout $CONSUME_TIMEOUT --topic benchmark-${i}-BYTES --messages $MSGS  > /tmp/consume.txt
+  echo;echo "(I) Consumer & Producer exited..."
+  Pause
+  CONSUME=`cat /tmp/consume.txt|tail -1`
+
+  PRINT_ACKS=`printf "%3s\n" "$j";`
+
+  P_MBSEC=`echo $PRODUCE|tail -1|awk '{print $6}'|sed "s/(//g"`
+  PRINT_P_MBSEC=`printf "%6s\n" "$P_MBSEC";`
+
+  C_MBSEC=`echo $CONSUME| tail -1|awk '{print $6}'|sed "s/,//g"`
+  PRINT_C_MBSEC=`printf "%8s\n" "$C_MBSEC";`
+
+  C_MB=`echo $CONSUME|tail -1|awk '{print $5}'|sed "s/,//g"`
+  PRINT_C_MB=`printf "%9s\n" "$C_MB";`
+
+  if [ "$DONE" = "no" ]
+  then
+    echo "___________________________________________________" >>results.txt
+    echo "Produce $MSGS messages using ${PARTITIONS} partition(s) " >> results.txt
+    DONE=yes
+  fi
+
+  export DT2=`date "+%Y%m%d-%H%M%S"`
+  echo "${DT2}:Acks=${PRINT_ACKS}  Produce MB/sec=${PRINT_P_MBSEC} Msg Size=${msgsize_print}. BYTESTREAM: Consume MB/sec=${PRINT_C_MBSEC} for ${PRINT_C_MB}MB. " | tee -a results.txt
+  set +x
+  mkdir logs 2>/dev/null
+  echo ${PRODUCE} > logs/${DT2}_produce_${i}_BYTE.txt
+  echo ${CONSUME} > logs/${DT2}_consume_bytestream_${i}_BYTE.txt
+
+  sleep 10
+ done
+done
